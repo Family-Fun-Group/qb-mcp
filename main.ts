@@ -22,9 +22,23 @@ import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 
-const slug = process.argv[2];
-if (!slug || !/^[a-z0-9-]+$/.test(slug)) {
-	process.stderr.write("usage: qb-mcp <company-slug> (lowercase letters, digits, dashes)\n");
+/**
+ * Two ways to run this binary:
+ *   qb-mcp <company-slug>   the persistent MCP server for one already-known
+ *                           (or about-to-be-known) company
+ *   qb-mcp --connect        one-shot: sign into whichever QuickBooks company
+ *                           the user picks in the browser, print who it was,
+ *                           exit. The caller (Cowork) uses this to discover
+ *                           the company BEFORE naming the server, so nobody
+ *                           has to type a company name that has to somehow
+ *                           match whatever they pick in Intuit's own picker.
+ */
+const DISCOVER = process.argv[2] === "--connect";
+const slug = DISCOVER ? "" : process.argv[2];
+if (!DISCOVER && (!slug || !/^[a-z0-9-]+$/.test(slug))) {
+	process.stderr.write(
+		"usage: qb-mcp <company-slug> (lowercase letters, digits, dashes)\n       qb-mcp --connect\n",
+	);
 	process.exit(2);
 }
 
@@ -66,15 +80,17 @@ function isStoredTokens(value: unknown): value is StoredTokens {
 }
 
 let tokens: StoredTokens | null = null;
-try {
-	const stored: unknown = JSON.parse(await readFile(STORE_PATH, "utf8"));
-	if (isStoredTokens(stored)) tokens = stored;
-} catch {
-	// Not connected yet — quickbooks_connect exists for exactly this.
+if (!DISCOVER) {
+	try {
+		const stored: unknown = JSON.parse(await readFile(STORE_PATH, "utf8"));
+		if (isStoredTokens(stored)) tokens = stored;
+	} catch {
+		// Not connected yet — quickbooks_connect exists for exactly this.
+	}
 }
 
 async function saveTokens(): Promise<void> {
-	if (!tokens) return;
+	if (!tokens || DISCOVER) return; // discover mode hands tokens back on stdout instead
 	await mkdir(STORE_DIR, { recursive: true });
 	const temp = `${STORE_PATH}.${process.pid}.tmp`;
 	await writeFile(temp, `${JSON.stringify(tokens, null, 2)}\n`, { mode: 0o600 });
@@ -82,7 +98,7 @@ async function saveTokens(): Promise<void> {
 }
 
 function log(message: string): void {
-	process.stderr.write(`[qb-mcp ${slug}] ${message}\n`);
+	process.stderr.write(`[qb-mcp ${DISCOVER ? "connect" : slug}] ${message}\n`);
 }
 
 // ---------------------------------------------------------------------------
@@ -528,4 +544,59 @@ async function handleLine(line: string): Promise<void> {
 	}
 }
 
-log(`ready (connected: ${tokens ? (tokens.companyName ?? tokens.realmId) : "no"})`);
+/**
+ * `--connect`: run one OAuth round trip, print who signed in, exit. No
+ * stdin/stdout MCP loop — the caller (Cowork) just wants the answer to
+ * "which company did the user pick?" before it names anything.
+ */
+async function discoverAndExit(): Promise<never> {
+	if (!CLIENT_ID || !CLIENT_SECRET) {
+		process.stdout.write(
+			`${JSON.stringify({ error: "QB_CLIENT_ID / QB_CLIENT_SECRET are not set on this server." })}\n`,
+		);
+		process.exit(1);
+	}
+	let url: string;
+	try {
+		url = await connect();
+	} catch (error) {
+		process.stdout.write(
+			`${JSON.stringify({ error: error instanceof Error ? error.message : String(error) })}\n`,
+		);
+		process.exit(1);
+	}
+	process.stdout.write(`${JSON.stringify({ url })}\n`);
+	const timeout = new Promise<never>((_resolve, reject) => {
+		setTimeout(() => reject(new Error("Sign-in timed out after 5 minutes")), 5 * 60_000).unref();
+	});
+	try {
+		if (!pendingAuth) throw new Error("connect() did not start a listener");
+		await Promise.race([pendingAuth.done, timeout]);
+	} catch (error) {
+		process.stdout.write(
+			`${JSON.stringify({ error: error instanceof Error ? error.message : String(error) })}\n`,
+		);
+		process.exit(1);
+	}
+	if (!tokens) {
+		process.stdout.write(`${JSON.stringify({ error: "Sign-in did not complete." })}\n`);
+		process.exit(1);
+	}
+	process.stdout.write(
+		`${JSON.stringify({
+			realmId: tokens.realmId,
+			companyName: tokens.companyName ?? tokens.realmId,
+			accessToken: tokens.accessToken,
+			accessExpiresAt: tokens.accessExpiresAt,
+			refreshToken: tokens.refreshToken,
+			refreshExpiresAt: tokens.refreshExpiresAt,
+		})}\n`,
+	);
+	process.exit(0);
+}
+
+if (DISCOVER) {
+	await discoverAndExit();
+} else {
+	log(`ready (connected: ${tokens ? (tokens.companyName ?? tokens.realmId) : "no"})`);
+}

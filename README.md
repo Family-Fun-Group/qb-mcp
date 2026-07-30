@@ -15,6 +15,19 @@ runtime required.
 qb-mcp <company-slug>
 ```
 
+```
+qb-mcp --connect
+```
+
+One-shot company discovery: runs the OAuth round trip, prints
+`{"url": "..."}` immediately (open it, or let the caller's own browser-open
+win), then on completion prints
+`{"realmId","companyName","accessToken","accessExpiresAt","refreshToken","refreshExpiresAt"}`
+and exits 0 — or `{"error": "..."}` and exits 1. Callers use this to learn
+which company the user picked in Intuit's own account/company selector
+*before* deciding what to name the persistent server, instead of asking the
+user to type a company name that has to somehow match their pick.
+
 Environment:
 
 | Var | Purpose |
