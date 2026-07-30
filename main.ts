@@ -16,7 +16,7 @@
  */
 
 import { createServer } from "node:http";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -48,13 +48,48 @@ const API_BASE =
 	process.env.QB_SANDBOX === "1"
 		? "https://sandbox-quickbooks.api.intuit.com"
 		: "https://quickbooks.api.intuit.com";
-const TOKEN_URL = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer";
-const AUTHORIZE_URL = "https://appcenter.intuit.com/connect/oauth2";
+/** Pinned fallbacks — overridden below by Intuit's own discovery document. */
+const TOKEN_URL_FALLBACK = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer";
+const AUTHORIZE_URL_FALLBACK = "https://appcenter.intuit.com/connect/oauth2";
 const MINOR_VERSION = "75";
 /** All three are registered on the Intuit app; serial sign-ins reuse 8791. */
 const CALLBACK_PORTS = [8791, 8792, 8793];
 const STORE_DIR = join(homedir(), ".cowork", "quickbooks");
 const STORE_PATH = join(STORE_DIR, `${slug}.json`);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Intuit's own discovery document is the source of truth for these two
+ * URLs, so a future endpoint rotation on their side doesn't require a
+ * qb-mcp release. A slow or unreachable discovery endpoint must never block
+ * sign-in, so this has a short timeout and falls straight back to the
+ * pinned, currently-correct URLs above on any failure.
+ */
+let TOKEN_URL = TOKEN_URL_FALLBACK;
+let AUTHORIZE_URL = AUTHORIZE_URL_FALLBACK;
+try {
+	const discoveryUrl =
+		process.env.QB_SANDBOX === "1"
+			? "https://developer.api.intuit.com/.well-known/openid_sandbox_configuration"
+			: "https://developer.api.intuit.com/.well-known/openid_configuration";
+	const response = await fetch(discoveryUrl, { signal: AbortSignal.timeout(3_000) });
+	if (response.ok) {
+		const raw: unknown = await response.json();
+		if (
+			isRecord(raw) &&
+			typeof raw.token_endpoint === "string" &&
+			typeof raw.authorization_endpoint === "string"
+		) {
+			TOKEN_URL = raw.token_endpoint;
+			AUTHORIZE_URL = raw.authorization_endpoint;
+		}
+	}
+} catch {
+	// Fall back to the pinned URLs above.
+}
 
 interface StoredTokens {
 	realmId: string;
@@ -105,6 +140,9 @@ function log(message: string): void {
 // OAuth
 // ---------------------------------------------------------------------------
 
+/** The refresh token was revoked or is dead — no retry will fix this, only re-auth. */
+class TokenRevokedError extends Error {}
+
 async function tokenRequest(body: URLSearchParams): Promise<StoredTokens> {
 	const response = await fetch(TOKEN_URL, {
 		method: "POST",
@@ -116,10 +154,21 @@ async function tokenRequest(body: URLSearchParams): Promise<StoredTokens> {
 		body,
 		signal: AbortSignal.timeout(30_000),
 	});
-	if (!response.ok)
-		throw new Error(
-			`Intuit token endpoint: HTTP ${response.status} — ${await response.text()}`,
-		);
+	if (!response.ok) {
+		const text = await response.text();
+		let code: string | undefined;
+		try {
+			const parsed: unknown = JSON.parse(text);
+			if (isRecord(parsed) && typeof parsed.error === "string") code = parsed.error;
+		} catch {
+			// Non-JSON error body — fall through to the generic error below.
+		}
+		if (code === "invalid_grant")
+			throw new TokenRevokedError(
+				"QuickBooks access was disconnected, or the refresh token expired. Call quickbooks_connect to sign in again.",
+			);
+		throw new Error(`Intuit token endpoint: HTTP ${response.status} — ${text}`);
+	}
 	const raw: unknown = await response.json();
 	if (!isIntuitTokenResponse(raw))
 		throw new Error("Intuit token endpoint returned an unexpected shape");
@@ -160,14 +209,24 @@ async function ensureAccessToken(): Promise<string> {
 			throw new Error(
 				"The QuickBooks refresh token has expired (Intuit caps it at 100 days). Call quickbooks_connect to sign in again.",
 			);
-		const next = await tokenRequest(
-			new URLSearchParams({ grant_type: "refresh_token", refresh_token: tokens.refreshToken }),
-		);
-		next.realmId = tokens.realmId;
-		next.companyName = tokens.companyName;
-		tokens = next;
-		await saveTokens();
-		log("access token refreshed");
+		try {
+			const next = await tokenRequest(
+				new URLSearchParams({ grant_type: "refresh_token", refresh_token: tokens.refreshToken }),
+			);
+			next.realmId = tokens.realmId;
+			next.companyName = tokens.companyName;
+			tokens = next;
+			await saveTokens();
+			log("access token refreshed");
+		} catch (error) {
+			if (error instanceof TokenRevokedError) {
+				// Dead for good — clear it so every future call fails fast with
+				// the same clear message instead of retrying a doomed refresh.
+				tokens = null;
+				if (!DISCOVER) await rm(STORE_PATH, { force: true });
+			}
+			throw error;
+		}
 	})().finally(() => {
 		refreshing = null;
 	});

@@ -35,6 +35,20 @@ Environment:
 | `QB_CLIENT_ID` / `QB_CLIENT_SECRET` | Intuit app credentials (required for sign-in and token refresh) |
 | `QB_SANDBOX=1` | Use Intuit's sandbox API instead of production |
 
+## Implementation notes
+
+- **Endpoint discovery.** Authorization and token endpoints are resolved
+  from Intuit's own OpenID discovery document
+  (`https://developer.api.intuit.com/.well-known/openid_configuration`,
+  or the `_sandbox_` variant under `QB_SANDBOX=1`) at startup, with a
+  3-second timeout and a pinned fallback to the currently-correct URLs if
+  discovery is unreachable.
+- **Revoked/dead refresh tokens.** A token-endpoint `invalid_grant`
+  response (disconnected app, expired 100-day refresh token) is detected
+  specifically: the stored tokens are cleared immediately rather than
+  retried, so every subsequent call fails fast with a clear
+  "sign in again" message instead of repeating a doomed refresh.
+
 ## Tools
 
 - `quickbooks_status` — which company this instance is bound to, sign-in expiry
