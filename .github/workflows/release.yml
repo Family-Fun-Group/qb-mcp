@@ -1,0 +1,38 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Compile binaries
+        run: |
+          mkdir -p release
+          bun build --compile --target=bun-windows-x64 main.ts --outfile release/qb-mcp-windows-x64.exe
+          bun build --compile --target=bun-linux-x64 main.ts --outfile release/qb-mcp-linux-x64
+          bun build --compile --target=bun-darwin-arm64 main.ts --outfile release/qb-mcp-darwin-arm64
+          (cd release && sha256sum * > qb-mcp-sha256sums.txt)
+
+      - name: Smoke-test the linux binary
+        run: |
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | timeout 5 ./release/qb-mcp-linux-x64 smoke | grep -q quickbooks_query
+
+      - name: Attach to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
