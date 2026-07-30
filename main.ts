@@ -378,7 +378,16 @@ async function qboFetch(path: string, init?: RequestInit, retried = false): Prom
 		return qboFetch(path, init, true);
 	}
 	const text = await response.text();
-	if (!response.ok) throw new Error(`QuickBooks API: HTTP ${response.status} — ${text.slice(0, 800)}`);
+	if (!response.ok) {
+		const tid = response.headers.get("intuit_tid") ?? "none";
+		// Structured, greppable line for support/troubleshooting — includes
+		// the Intuit-assigned transaction id so a report to Intuit can be
+		// correlated with their own server-side logs.
+		log(
+			`QBO API error tid=${tid} status=${response.status} path=${path} body=${text.slice(0, 800).replace(/\n/g, " ")}`,
+		);
+		throw new Error(`QuickBooks API: HTTP ${response.status} (intuit_tid ${tid}) — ${text.slice(0, 800)}`);
+	}
 	return text ? (JSON.parse(text) as unknown) : {};
 }
 
