@@ -16,23 +16,30 @@ scopes granted during sign-in.
 
 ## Where data goes
 
-- Nothing is sent to Family Fun Group's own servers. `qb-mcp` runs entirely
-  on the user's own machine.
+- Nothing is sent to Family Fun Group's own servers; `qb-mcp` itself runs
+  entirely on the user's own machine and talks directly to Intuit.
 - QuickBooks API requests go directly from the user's machine to Intuit's
   API (`quickbooks.api.intuit.com`) — never through a third-party relay.
 - OAuth tokens are stored locally on the user's machine
   (`~/.cowork/quickbooks/`), never transmitted anywhere except to Intuit's
   own token endpoint for refresh.
-- The only shared infrastructure involved is an internal credential broker
-  that hands the app's own OAuth *client ID* (not the user's data or
-  tokens) to the Cowork app at install time, so users don't have to create
-  their own Intuit developer app.
+- **The QuickBooks data itself does leave the machine in one case:** when
+  the user asks Cowork's AI assistant to read or act on QuickBooks data,
+  that data is sent to Anthropic's Claude API as part of the conversation,
+  so the assistant can reason about it and decide what to do. This is the
+  same as pasting that data into a chat — it is processed under
+  Anthropic's own API data-handling terms, not stored by Family Fun
+  Group, and only sent when the user's own request requires it.
+- The only shared infrastructure involved otherwise is an internal
+  credential broker that hands the app's OAuth *client ID* (not the
+  user's data or tokens) to the Cowork app at install time, so users
+  don't have to create their own Intuit developer app.
 
 ## Data retention
 
 Tokens persist locally until the user disconnects the company in Cowork or
 uninstalls the app. No QuickBooks data is copied to any Family Fun Group
-server or third party.
+server.
 
 ## Contact
 
